@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -12,6 +13,14 @@ st.set_page_config(page_title="Portfolio Analyzer", layout="wide", page_icon="�
 
 st.title("📊 Portfolio Analyzer — EUR")
 st.caption("Análisis de carteras con conversión de divisa, frontera eficiente y proyección de riqueza")
+
+# Mostrar fecha de última actualización de datos
+if os.path.exists("data/last_update.txt"):
+    with open("data/last_update.txt") as f:
+        last_update = f.read().strip()
+    st.info(f"📅 Datos actualizados: {last_update} · Se actualizan automáticamente cada lunes")
+else:
+    st.warning("⚠️ No hay datos locales todavía. Ejecuta `update_data.py` o espera a que GitHub Actions los genere.")
 
 # ============================================================
 # SEARCH
@@ -58,72 +67,78 @@ def yahoo_search(query: str, max_results: int = 25):
 # ============================================================
 # DOWNLOADS (cached)
 # ============================================================
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def download_close(ticker: str, start: str) -> pd.Series:
-    """Descarga precios usando la API de Yahoo Finance directamente (sin yfinance)."""
-    import time
+    """Lee el CSV local guardado por update_data.py.
+    Fallback a Yahoo Finance si el CSV no existe (primera carga)."""
+    import datetime, time
 
-    # Convertir fecha a timestamp Unix
-    import datetime
-    dt_start = datetime.datetime.strptime(start, "%Y-%m-%d")
-    ts1 = int(dt_start.timestamp())
-    ts2 = int(datetime.datetime.now().timestamp())
+    safe_name  = ticker.replace("=", "_").replace("/", "_")
+    local_path = f"data/{safe_name}.csv"
 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {
-        "period1": ts1,
-        "period2": ts2,
-        "interval": "1d",
-        "events": "history",
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://finance.yahoo.com",
-    }
-
-    for attempt in range(3):
+    # ── Leer CSV local si existe ──────────────────────────────
+    if os.path.exists(local_path):
         try:
-            r = requests.get(url, params=params, headers=headers, timeout=20)
-            r.raise_for_status()
-            data = r.json()
-            result = data["chart"]["result"][0]
-            timestamps = result["timestamp"]
-            closes = result["indicators"]["adjclose"][0]["adjclose"]
-            dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None).normalize()
-            s = pd.Series(closes, index=dates, name=ticker).astype(float).dropna()
-            if len(s) > 0:
+            s = pd.read_csv(local_path, index_col=0, parse_dates=True).iloc[:, 0]
+            s.index = pd.to_datetime(s.index)
+            s = s.astype(float).dropna()
+            s.name = ticker
+            s = s[s.index >= pd.to_datetime(start)]
+            if len(s) > 10:
                 return s
         except Exception:
-            if attempt < 2:
-                time.sleep(1)
-            continue
+            pass  # si falla, intenta Yahoo como fallback
 
-    # Fallback con query2
-    url2 = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+    # ── Fallback: Yahoo Finance directo ──────────────────────
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "*/*",
+        "Referer": "https://finance.yahoo.com",
+    })
     try:
-        r = requests.get(url2, params=params, headers=headers, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        result = data["chart"]["result"][0]
-        timestamps = result["timestamp"]
-        closes = result["indicators"]["adjclose"][0]["adjclose"]
-        dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None).normalize()
-        s = pd.Series(closes, index=dates, name=ticker).astype(float).dropna()
-        if len(s) > 0:
-            return s
+        session.get("https://finance.yahoo.com", timeout=10)
+    except Exception:
+        pass
+    crumb = None
+    try:
+        r = session.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+        if r.status_code == 200 and r.text and "<" not in r.text:
+            crumb = r.text.strip()
     except Exception:
         pass
 
-    raise ValueError(f"Sin datos para '{ticker}'. ¿Es el ticker correcto?")
+    ts1 = int(datetime.datetime.strptime(start, "%Y-%m-%d").timestamp())
+    ts2 = int(datetime.datetime.now().timestamp())
+    params = {"period1": ts1, "period2": ts2, "interval": "1d"}
+    if crumb:
+        params["crumb"] = crumb
 
-@st.cache_data(ttl=3600, show_spinner=False)
+    for base in ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]:
+        try:
+            r = session.get(f"{base}/v8/finance/chart/{ticker}", params=params, timeout=20)
+            r.raise_for_status()
+            data   = r.json()
+            result = data["chart"]["result"][0]
+            try:
+                closes = result["indicators"]["adjclose"][0]["adjclose"]
+            except Exception:
+                closes = result["indicators"]["quote"][0]["close"]
+            dates = pd.to_datetime(result["timestamp"], unit="s", utc=True).tz_convert(None).normalize()
+            s = pd.Series(closes, index=dates, name=ticker).astype(float).dropna()
+            if len(s) > 10:
+                return s
+        except Exception:
+            time.sleep(0.5)
+
+    raise ValueError(f"Sin datos para '{ticker}'. Ejecuta update_data.py para generar los CSVs.")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_eurusd(start: str) -> pd.Series:
     s = download_close("EURUSD=X", start=start)
     s.name = "EURUSD"
     return s
-
 def download_prices(tickers, start):
     series = []
     for t in tickers:
