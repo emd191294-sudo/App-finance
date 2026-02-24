@@ -296,10 +296,24 @@ def render_scenario(key, title, start_default, bench_default,
     bench_ccy = c4.selectbox("Bench CCY",       ["USD", "EUR"],       key=f"{key}_bench_ccy")
 
     # Search
-    with st.expander("🔍 Buscar activos", expanded=False):
-        query = st.text_input("Buscar ticker o nombre", key=f"{key}_query",
-                              placeholder="Ej: azvalor, iShares MSCI, BTC...")
-        if query and len(query) >= 2:
+    with st.expander("🔍 Buscar activos", expanded=True):
+        options_key  = f"{key}_search_options"   # dict {label: ticker}
+        sel_key      = f"{key}_search_sel"        # list de labels seleccionados
+
+        # Inicializar estado si no existe
+        if options_key not in st.session_state:
+            st.session_state[options_key] = {}
+        if sel_key not in st.session_state:
+            st.session_state[sel_key] = []
+
+        # ── Fila búsqueda + botón Buscar ──────────────────────
+        qcol, bcol = st.columns([4, 1])
+        query = qcol.text_input("Buscar ticker o nombre", key=f"{key}_query",
+                                placeholder="Ej: azvalor, iShares MSCI, BTC...")
+        buscar = bcol.button("🔍 Buscar", key=f"{key}_btn_buscar")
+
+        # Solo busca cuando se pulsa el botón (no en cada tecla)
+        if buscar and query and len(query) >= 2:
             with st.spinner("Buscando..."):
                 results = yahoo_search(query)
             if results:
@@ -309,13 +323,30 @@ def render_scenario(key, title, start_default, bench_default,
                     if r['exchange']:
                         label += f" [{r['exchange']}]"
                     options[label] = r["ticker"]
-                selected_labels = st.multiselect("Selecciona uno o varios:", list(options.keys()),
-                                                  key=f"{key}_search_sel")
-                if st.button("➕ Añadir seleccionados", key=f"{key}_add_sel"):
-                    add_from_search(key, [options[l] for l in selected_labels])
-                    st.rerun()
+                st.session_state[options_key] = options
+                st.session_state[sel_key] = []  # reset selección al buscar de nuevo
             else:
+                st.session_state[options_key] = {}
                 st.caption("Sin resultados.")
+
+        # ── Mostrar resultados como checkboxes ────────────────
+        if st.session_state[options_key]:
+            options = st.session_state[options_key]
+            st.caption(f"{len(options)} resultados — marca los que quieras añadir:")
+
+            selected = []
+            for label, ticker in options.items():
+                already = ticker in {r[0] for r in st.session_state[f"{key}_rows"]}
+                checked = st.checkbox(label, key=f"{key}_chk_{ticker}",
+                                      value=already, disabled=already)
+                if checked and not already:
+                    selected.append(ticker)
+
+            if st.button("➕ Añadir marcados a la cartera", key=f"{key}_add_sel",
+                         disabled=len(selected) == 0):
+                add_from_search(key, selected)
+                st.session_state[options_key] = {}
+                st.rerun()
 
     # Ticker rows
     st.markdown("**Ticker &nbsp;&nbsp;&nbsp; Peso &nbsp;&nbsp;&nbsp; CCY**")
