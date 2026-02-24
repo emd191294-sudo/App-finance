@@ -60,35 +60,61 @@ def yahoo_search(query: str, max_results: int = 25):
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_close(ticker: str, start: str) -> pd.Series:
+    """Descarga precios usando la API de Yahoo Finance directamente (sin yfinance)."""
+    import time
+
+    # Convertir fecha a timestamp Unix
+    import datetime
+    dt_start = datetime.datetime.strptime(start, "%Y-%m-%d")
+    ts1 = int(dt_start.timestamp())
+    ts2 = int(datetime.datetime.now().timestamp())
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {
+        "period1": ts1,
+        "period2": ts2,
+        "interval": "1d",
+        "events": "history",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com",
+    }
+
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            result = data["chart"]["result"][0]
+            timestamps = result["timestamp"]
+            closes = result["indicators"]["adjclose"][0]["adjclose"]
+            dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None).normalize()
+            s = pd.Series(closes, index=dates, name=ticker).astype(float).dropna()
+            if len(s) > 0:
+                return s
+        except Exception:
+            if attempt < 2:
+                time.sleep(1)
+            continue
+
+    # Fallback con query2
+    url2 = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
     try:
-        # yfinance >= 0.2.61: usar Ticker.history() es más fiable que download()
-        tkr_obj = yf.Ticker(ticker)
-        df = tkr_obj.history(start=start, auto_adjust=True)
-        if df is not None and not df.empty and "Close" in df.columns:
-            s = df["Close"].astype(float).dropna()
-            s.name = ticker
+        r = requests.get(url2, params=params, headers=headers, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        closes = result["indicators"]["adjclose"][0]["adjclose"]
+        dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None).normalize()
+        s = pd.Series(closes, index=dates, name=ticker).astype(float).dropna()
+        if len(s) > 0:
             return s
     except Exception:
         pass
-
-    # Fallback: download() clásico
-    for adj in [True, False]:
-        try:
-            df = yf.download(ticker, start=start, auto_adjust=adj, progress=False)
-            if df is None or df.empty:
-                continue
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            for col_name in ["Close", "Adj Close"] + list(df.columns):
-                if col_name in df.columns:
-                    s = df[col_name].astype(float).dropna()
-                    if isinstance(s, pd.DataFrame):
-                        s = s.iloc[:, 0]
-                    if len(s) > 0:
-                        s.name = ticker
-                        return s
-        except Exception:
-            continue
 
     raise ValueError(f"Sin datos para '{ticker}'. ¿Es el ticker correcto?")
 
