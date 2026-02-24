@@ -60,17 +60,32 @@ def yahoo_search(query: str, max_results: int = 25):
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_close(ticker: str, start: str) -> pd.Series:
-    df = yf.download(ticker, start=start, auto_adjust=True, progress=False)
+    # Intentar con auto_adjust y sin él como fallback
+    df = None
+    for adj in [True, False]:
+        try:
+            df = yf.download(ticker, start=start, auto_adjust=adj, progress=False)
+            if df is not None and not df.empty:
+                break
+        except Exception:
+            continue
+
     if df is None or df.empty:
-        raise ValueError(f"Sin datos para {ticker}")
+        raise ValueError(f"Sin datos para {ticker}. Comprueba que el ticker es correcto.")
+
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    col = "Close" if "Close" in df.columns else df.columns[0]
-    s = df[col].astype(float).dropna()
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
-    s.name = ticker
-    return s
+
+    for col_name in ["Adj Close", "Close"] + list(df.columns):
+        if col_name in df.columns:
+            s = df[col_name].astype(float).dropna()
+            if isinstance(s, pd.DataFrame):
+                s = s.iloc[:, 0]
+            if len(s) > 0:
+                s.name = ticker
+                return s
+
+    raise ValueError(f"Sin datos para {ticker}.")
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_eurusd(start: str) -> pd.Series:
